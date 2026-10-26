@@ -1,0 +1,25 @@
+# Local TV backups, screenshots, logs, credentials and test output.
+**/backup/
+**/backups/
+**/shots/
+**/logs/
+**/test-results/
+**/adbkey/
+**/.cleanyourtv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/*.log
+**/*.apk
+**/*.aab
+**/.gradle/
+**/build/
+**/local.properties
+**/local-settings.json
+.env
+.env.*
+
+# Personal notes from the local setup session; public instructions are in README.md.
+/Инструкция Apollo Premium2K.txt
+/ApolloTV/ПРОЧТИ МЕНЯ.txt
+/ApolloTV/ИСПРАВЛЕНИЕ HOME.txt
