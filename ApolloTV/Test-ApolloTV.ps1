@@ -147,4 +147,39 @@ Invoke-LauncherInstall
 Assert $true 'Recognize successful APK install followed by the reported Home-resolution failure'
 Write-Text $fakeInstaller 'param($TvHost,$StockLauncher); Write-Output "Failure [INSTALL_FAILED_VERIFICATION_FAILURE]"; exit 1'
 Must-Fail { Invoke-LauncherInstall } 'Do not treat an APK verification failure as successful installation'
+
+# Wallpaper conversion uses a separate JPEG copy and retains the source.
+Add-Type -AssemblyName System.Drawing
+$wallSource = Join-Path $testRoot 'source wallpaper.png'
+$sourceImage = New-Object Drawing.Bitmap(2400,1350)
+try { $sourceImage.Save($wallSource, [Drawing.Imaging.ImageFormat]::Png) } finally { $sourceImage.Dispose() }
+$wallTarget = Join-Path $testRoot 'wallpaper.jpg'
+Convert-Wallpaper $wallSource $wallTarget
+$converted = [Drawing.Image]::FromFile($wallTarget)
+try {
+    Assert ($converted.Width -eq 1920 -and $converted.Height -eq 1080) 'Resize large wallpaper for TV'
+    Assert ($converted.RawFormat.Guid -eq [Drawing.Imaging.ImageFormat]::Jpeg.Guid) 'Output is a real JPEG'
+} finally { $converted.Dispose() }
+Assert (Test-Path -LiteralPath $wallSource) 'Retain original wallpaper file'
+$invalidImage = Join-Path $testRoot 'invalid.txt'
+Write-Text $invalidImage 'not an image'
+Must-Fail { Convert-Wallpaper $invalidImage (Join-Path $testRoot 'invalid.jpg') } 'Reject unsupported wallpaper file'
+$themeFixture = [pscustomobject]@{dock_apps=@('app.one','app.two'); columns=6; wallpaper=$false; show_clock=$false}
+$withWallpaper = Set-WallpaperOptions $themeFixture $true 35
+Assert ($withWallpaper.wallpaper -eq $true -and $withWallpaper.wallpaper_dim -eq 35) 'Enable chosen wallpaper and dimming'
+Assert (($withWallpaper.dock_apps -join ',') -eq 'app.one,app.two' -and $withWallpaper.show_clock -eq $false) 'Keep unrelated theme settings'
+$withoutWallpaper = Set-WallpaperOptions $withWallpaper $false 0
+Assert ($withoutWallpaper.wallpaper -eq $false -and $withoutWallpaper.columns -eq 6) 'Reset wallpaper without resetting columns'
+$cachedTheme = Join-Path $testRoot 'previous-theme'
+New-Item -ItemType Directory -Path $cachedTheme -Force | Out-Null
+Write-Text (Join-Path $cachedTheme 'config.json') ((Set-WallpaperOptions $themeFixture $true 35) | ConvertTo-Json -Depth 10)
+Copy-Item -LiteralPath $wallTarget -Destination (Join-Path $cachedTheme 'wallpaper.jpg')
+Write-Text (Join-Path $testRoot 'last-theme.txt') $cachedTheme
+Apply-DockTheme
+$reapplied = Get-LocalThemeFolder
+$reappliedConfig = Get-Content -LiteralPath (Join-Path $reapplied 'config.json') -Raw | ConvertFrom-Json
+Assert ($reappliedConfig.wallpaper -eq $true -and $reappliedConfig.columns -eq 7) 'Keep wallpaper when reapplying dock'
+Assert ((Get-FileHash -LiteralPath (Join-Path $reapplied 'wallpaper.jpg')).Hash -eq (Get-FileHash -LiteralPath $wallTarget).Hash) 'Keep cached wallpaper asset on Home fix'
+Write-Text (Join-Path $testRoot 'last-theme.txt') (Split-Path -Parent $testRoot)
+Must-Fail { Get-LocalThemeFolder } 'Reject theme marker outside device backup folder'
 Write-Host "PASS: $count checks. No network requests or real-TV operations were performed."

@@ -1,9 +1,12 @@
 ﻿[CmdletBinding()]
 param(
-    [ValidateSet('Install','Prepare','Restore','Check','Switch')][string]$Mode = 'Install',
+    [ValidateSet('Install','Prepare','Restore','Check','Switch','Wallpaper')][string]$Mode = 'Install',
     [string]$TvAddress = '',
     [ValidateRange(1,65535)][int]$Port = 5555,
     [string]$WorkRoot = (Join-Path $env:USERPROFILE 'ApolloTV-Tools'),
+    [string]$WallpaperPath = '',
+    [switch]$ResetWallpaper,
+    [ValidateRange(0,90)][int]$WallpaperDim = 20,
     [switch]$LibraryOnly
 )
 
@@ -329,11 +332,100 @@ function Set-Dock([string[]]$Packages) {
     Write-Host 'Seven dock slots configured. Missing or incorrectly matched apps can be changed with Settings > Edit dock.'
 }
 function Apply-DockTheme {
-    $themeFolder = Join-Path $script:StateFolder 'dock-theme'
+    $themeFolder = Join-Path $script:StateFolder ('dock-theme-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $themeFolder -Force | Out-Null
-    $theme = [ordered]@{ columns=7; dock_apps=@($script:DockPackages); fill_dock=$false; background='#000000' }
-    Write-Text (Join-Path $themeFolder 'config.json') ($theme | ConvertTo-Json -Depth 4)
+    $previous = Get-LocalThemeFolder
+    $theme = if ($previous) { Get-Content -LiteralPath (Join-Path $previous 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json } else { [pscustomobject]@{} }
+    $theme | Add-Member -MemberType NoteProperty -Name columns -Value 7 -Force
+    $theme | Add-Member -MemberType NoteProperty -Name dock_apps -Value @($script:DockPackages) -Force
+    $theme | Add-Member -MemberType NoteProperty -Name fill_dock -Value $false -Force
+    if ($previous -and (Test-Path -LiteralPath (Join-Path $previous 'wallpaper.jpg'))) {
+        Copy-Item -LiteralPath (Join-Path $previous 'wallpaper.jpg') -Destination (Join-Path $themeFolder 'wallpaper.jpg')
+    }
+    Write-Text (Join-Path $themeFolder 'config.json') ($theme | ConvertTo-Json -Depth 20)
     Invoke-RepoScript 'tools\theme.ps1' @('-TvHost',$TvAddress,'-Theme',$themeFolder)
+    Write-Text (Join-Path $script:StateFolder 'last-theme.txt') $themeFolder
+}
+function Get-LocalThemeFolder {
+    $marker = Join-Path $script:StateFolder 'last-theme.txt'
+    if (Test-Path -LiteralPath $marker) {
+        $saved = (Get-Content -LiteralPath $marker -Raw -Encoding UTF8).Trim()
+        $allowed = [IO.Path]::GetFullPath($script:StateFolder).TrimEnd('\') + '\'
+        $resolved = [IO.Path]::GetFullPath($saved)
+        if (-not $resolved.StartsWith($allowed, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid saved theme path.' }
+        if (Test-Path -LiteralPath (Join-Path $resolved 'config.json')) { return $resolved }
+    }
+    $legacy = Join-Path $script:StateFolder 'dock-theme'
+    if (Test-Path -LiteralPath (Join-Path $legacy 'config.json')) { return $legacy }
+    return ''
+}
+function Convert-Wallpaper([string]$Source, [string]$Destination) {
+    $item = Get-Item -LiteralPath $Source -ErrorAction Stop
+    if ($item.PSIsContainer -or $item.Extension -notmatch '^\.(jpg|jpeg|png|bmp)$' -or $item.Length -gt 50MB) {
+        throw 'Choose a JPG, PNG or BMP image smaller than 50 MB.'
+    }
+    Add-Type -AssemblyName System.Drawing
+    $picture = $null; $bitmap = $null; $graphics = $null
+    try {
+        $picture = [Drawing.Image]::FromFile($item.FullName)
+        if ([long]$picture.Width * $picture.Height -gt 50000000) { throw 'Image dimensions exceed 50 megapixels.' }
+        $scale = [Math]::Min(1.0, [Math]::Min(1920.0 / $picture.Width, 1080.0 / $picture.Height))
+        $width = [Math]::Max(1, [int][Math]::Round($picture.Width * $scale))
+        $height = [Math]::Max(1, [int][Math]::Round($picture.Height * $scale))
+        $bitmap = New-Object Drawing.Bitmap($width, $height)
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        $graphics.Clear([Drawing.Color]::Black)
+        $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.DrawImage($picture, 0, 0, $width, $height)
+        $bitmap.Save($Destination, [Drawing.Imaging.ImageFormat]::Jpeg)
+    } finally {
+        if ($graphics) { $graphics.Dispose() }
+        if ($bitmap) { $bitmap.Dispose() }
+        if ($picture) { $picture.Dispose() }
+    }
+}
+function Set-WallpaperOptions($Theme, [bool]$Enabled, [int]$Dim) {
+    $Theme | Add-Member -MemberType NoteProperty -Name wallpaper -Value $Enabled -Force
+    $Theme | Add-Member -MemberType NoteProperty -Name wallpaper_rotation_minutes -Value 0 -Force
+    $Theme | Add-Member -MemberType NoteProperty -Name wallpaper_dim -Value $Dim -Force
+    return $Theme
+}
+function Change-Wallpaper {
+    if ((Read-TV 'pm path com.gathin.tvhome') -notmatch '(?m)^package:/.+\.apk\s*$') { throw 'Install CleanYourTV before changing its wallpaper.' }
+    $selection = $WallpaperPath
+    $reset = [bool]$ResetWallpaper
+    if (-not $selection -and -not $reset) {
+        $choice = Read-Host 'Фон: 1 — выбрать картинку; 2 — вернуть чёрный фон; Enter — отмена'
+        if ($choice -eq '2') { $reset=$true }
+        elseif ($choice -eq '1') {
+            Add-Type -AssemblyName System.Windows.Forms
+            $dialog = New-Object Windows.Forms.OpenFileDialog
+            try {
+                $dialog.Title = 'Выберите фон главного экрана телевизора'
+                $dialog.Filter = 'Изображения (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp'
+                $dialog.Multiselect = $false
+                if ($dialog.ShowDialog() -ne [Windows.Forms.DialogResult]::OK) { Write-Host 'Отменено.'; return }
+                $selection = $dialog.FileName
+            } finally { $dialog.Dispose() }
+        } else { Write-Host 'Отменено.'; return }
+    }
+    if ($reset -and $selection) { throw 'Choose either a wallpaper file or -ResetWallpaper.' }
+    $previous = Get-LocalThemeFolder
+    # Read the current theme, preserving dock IDs and other JSON options.
+    $remote = Read-TV 'content read --uri content://com.gathin.tvhome.theme/config.json 2>/dev/null'
+    if ($remote) { $theme = $remote | ConvertFrom-Json }
+    elseif ($previous) { $theme = Get-Content -LiteralPath (Join-Path $previous 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json }
+    else { $theme = [pscustomobject]@{} }
+    if ($null -eq $theme -or $theme -isnot [pscustomobject]) { throw 'Current theme is not a JSON object; no wallpaper changes applied.' }
+    $folder = Join-Path $script:StateFolder ('wallpaper-theme-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    if (-not $reset) { Convert-Wallpaper $selection (Join-Path $folder 'wallpaper.jpg') }
+    $theme = Set-WallpaperOptions $theme (-not $reset) $WallpaperDim
+    Write-Text (Join-Path $folder 'config.json') ($theme | ConvertTo-Json -Depth 20)
+    Invoke-RepoScript 'tools\theme.ps1' @('-TvHost',$TvAddress,'-Theme',$folder)
+    Write-Text (Join-Path $script:StateFolder 'last-theme.txt') $folder
+    Save-Shot (Join-Path $folder 'after.png')
+    Write-Host 'Фон обновлён. Проверьте главный экран. После завершения выключите отладку на ТВ.' -ForegroundColor Green
 }
 function Connect-TV {
     if (-not $TvAddress) {
@@ -405,6 +497,8 @@ try {
             Write-Host (Read-TV 'getprop ro.build.version.release')
             Write-Host (Read-TV $script:HomeQuery)
             Write-Host 'Connection check passed. No TV settings changed.' -ForegroundColor Green
+        } elseif ($Mode -eq 'Wallpaper') {
+            Change-Wallpaper
         } elseif ($Mode -eq 'Restore') {
             $statePath = Join-Path $script:StateFolder 'original.json'
             if (-not (Test-Path -LiteralPath $statePath)) { throw 'No original backup exists for this TV. Restore refused.' }

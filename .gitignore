@@ -16,6 +16,8 @@
 **/build/
 **/local.properties
 **/local-settings.json
+/ApolloTV/wallpaper-theme-*/
+/ApolloTV/dock-theme-*/
 .env
 .env.*
 
